@@ -1,26 +1,27 @@
 #!/usr/bin/env python
 
 import argparse
-from collections import namedtuple
 import os
-import socket
 import sys
 from time import sleep
 
 import threading
-import SocketServer
+import socketserver
 
 import external_image
 import nibabel as nb
 import numpy as np
 
-SocketServer.TCPServer.allow_reuse_address = True
+import zmq
 
-class ThreadedTCPRequestHandler(SocketServer.BaseRequestHandler):
+socketserver.TCPServer.allow_reuse_address = True
+
+
+class ThreadedTCPRequestHandler(socketserver.BaseRequestHandler):
     def __init__(self, callback, infoclient, *args, **keys):
         self.callback = callback
         self.infoclient = infoclient
-        SocketServer.BaseRequestHandler.__init__(self, *args, **keys)
+        socketserver.BaseRequestHandler.__init__(self, *args, **keys)
 
     def handle(self):
         self.callback(self.infoclient, self.request)
@@ -30,17 +31,22 @@ class ThreadedTCPRequestHandler(SocketServer.BaseRequestHandler):
         self.request.sendall(response)
         '''
 
+
 def handler_factory(callback, infoclient):
     def createHandler(*args, **keys):
-        return ThreadedTCPRequestHandler(callback, infoclient,  *args, **keys)
+        return ThreadedTCPRequestHandler(callback, infoclient, *args, **keys)
+
     return createHandler
 
+
 def process_data_callback(infoclient, sock):
-    print "received info"
+    print("received info")
     infoclient.process_data(sock)
 
-class ThreadedTCPServer(SocketServer.ThreadingMixIn, SocketServer.TCPServer):
+
+class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     pass
+
 
 class ImageReceiver(object):
 
@@ -57,6 +63,8 @@ class ImageReceiver(object):
         self.save_4d = args.four_dimensional
         self.stop_after_one_series = args.single_series
 
+        self.zmqsocket = args.zmqsocket if args.zeromq else None
+
         self.ei = external_image.ExternalImage("ExternalImageHeader")
 
     def stop(self):
@@ -67,7 +75,7 @@ class ImageReceiver(object):
         if self.save_4d:
             self.save_imagestore()
 
-        print "image receiver stopped"
+        print("image receiver stopped")
 
     def start(self):
         self._startserver()
@@ -84,7 +92,7 @@ class ImageReceiver(object):
         server = ThreadedTCPServer((self.host, self.port),
                                    handler_factory(process_data_callback, self))
         ip, port = server.server_address
-        print "image receiver running at %s on port %d" % (ip, port)
+        print("image receiver running at %s on port %d" % (ip, port))
         # Start a thread with the server -- that thread will then start one
         # more thread for each request
         server_thread = threading.Thread(target=server.serve_forever)
@@ -101,15 +109,15 @@ class ImageReceiver(object):
             raise ValueError(
                 "Header data wrong size: expected %d bytes, got %d" %
                 (self.ei.get_header_size(), len(in_bytes))
-                )
-        print "processing %d header data bytes" % len(in_bytes)
+            )
+        print("processing %d header data bytes" % len(in_bytes))
 
         hdr = self.ei.process_header(in_bytes)
-        print hdr
+        print(hdr)
 
         # validation
         if self.current_uid != hdr.seriesUID:
-            #assert hdr.currentTR == 1
+            # assert hdr.currentTR == 1
             self.current_uid = hdr.seriesUID
             self.current_series_hdr = hdr
 
@@ -125,13 +133,13 @@ class ImageReceiver(object):
             raise ValueError(
                 "Image data wrong size: expected %d bytes, got %d" %
                 (self.ei.get_image_size(), len(img_data))
-                )
-        print "processing %d image data bytes" % len(img_data)
+            )
+        print("processing %d image data bytes" % len(img_data))
 
         new_ei = self.ei.process_image(img_data)
         if new_ei:
             if (isinstance(new_ei, nb.Nifti1Image) and
-                new_ei not in self.imagestore):
+                    new_ei not in self.imagestore):
                 self.imagestore.append(new_ei)
                 if not self.save_4d:
                     self.save_nifti(new_ei)
@@ -159,7 +167,9 @@ class ImageReceiver(object):
             filename = os.path.join(self.save_location,
                                     'img-%s.nii.gz' % self.current_uid)
         img.to_filename(filename)
-        print "Saved to %s" % filename
+        if self.zmqsocket:
+            self.zmqsocket.send(filename.encode('utf-8'))
+        print("Saved to %s" % filename)
 
     def save_imagestore(self):
         if len(self.imagestore) == 0:
@@ -169,19 +179,24 @@ class ImageReceiver(object):
         new_shape = (base_shape[0], base_shape[1], base_shape[2],
                      len(self.imagestore))
         new_data = np.zeros(new_shape)
-        for i in xrange(new_shape[3]):
+        for i in range(new_shape[3]):
             assert self.imagestore[i].get_shape() == \
-                self.imagestore[0].get_shape()
-            new_data[:,:,:,i] = self.imagestore[i].get_data()
+                   self.imagestore[0].get_shape()
+            new_data[:, :, :, i] = self.imagestore[i].get_data()
 
         new_img = nb.Nifti1Image(new_data, self.imagestore[0].get_affine())
         new_img.get_header().set_zooms((
-                self.current_series_hdr.pixelSpacingReadMM,
-                self.current_series_hdr.pixelSpacingPhaseMM,
-                self.current_series_hdr.pixelSpacingSliceMM,
-                self.current_series_hdr.repetitionTimeMS +
-                self.current_series_hdr.repetitionDelayMS))
+            self.current_series_hdr.pixelSpacingReadMM,
+            self.current_series_hdr.pixelSpacingPhaseMM,
+            self.current_series_hdr.pixelSpacingSliceMM,
+            self.current_series_hdr.repetitionTimeMS +
+            self.current_series_hdr.repetitionDelayMS))
         self.save_nifti(new_img)
+
+    @property
+    def is_running(self):
+        return self._is_running
+
 
 def parse_args(args):
     parser = argparse.ArgumentParser()
@@ -195,15 +210,27 @@ def parse_args(args):
                         help="Store each image series as a single 4D file.")
     parser.add_argument("-s", "--single_series", action="store_true",
                         help="Shut down the receiver after one entire series "
-                        "has been read.")
+                             "has been read.")
+    parser.add_argument("-z", "--zeromq", action="store_true", help="Use "
+                        "ZeroMQ to notify others of new files.")
     return parser.parse_args()
+
 
 def main(argv):
     args = parse_args(argv)
+
+    if args.zeromq:
+        context = zmq.Context()
+        zmqsocket = context.socket(zmq.PUB)
+        zmqsocket.bind("tcp://*:5555")
+        args.zmqsocket = zmqsocket
+        print("ZeroMQ socket bound to tcp://*:5555")
+
     receiver = ImageReceiver(args)
     receiver.start()
-    while(receiver._is_running):
+    while receiver.is_running:
         sleep(1)
+
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv))

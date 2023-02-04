@@ -88,7 +88,7 @@ class ExternalImage(object):
         for idx, key in enumerate(self.names):
             if key != 'voxelToWorldMatrix':
                 val = alist.pop(0)
-                if isinstance(val, basestring):
+                if isinstance(val, str):
                     values.append(val.split(b'\0', 1)[0])
                 else:
                     values.append(val)
@@ -185,12 +185,12 @@ class ExternalImage(object):
 
     def process_header(self, in_bytes):
         magic = struct.unpack('4s', in_bytes[:4])[0]
-        print magic
+        print(magic)
         if magic == 'ERTI' or magic == 'SIMU':
             # header
             self.hdr = self.hdr_from_bytes(in_bytes)
             h = self.hdr
-            print "header received: TR=%d" % self.hdr.currentTR
+            print("header received: TR=%d" % self.hdr.currentTR)
             if self.hdr.isMosaic:
                 nrows = int(np.ceil(np.sqrt(h.numSlices)))
                 self.num_bytes = (2 * h.numPixelsRead *
@@ -198,7 +198,7 @@ class ExternalImage(object):
             else:
                 self.num_bytes = (2 * h.numPixelsRead *
                                   h.numPixelsPhase * h.numSlices)
-            print "Requires: %d bytes" % self.num_bytes
+            print("Requires: %d bytes" % self.num_bytes)
             return self.hdr
         else:
             raise ValueError("Unknown magic number %s" % magic)
